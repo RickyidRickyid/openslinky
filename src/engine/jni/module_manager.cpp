@@ -1,0 +1,536 @@
+﻿// 0x28000: module manager - per-event handler lists, dispatch, small item helpers
+// cflags: /Ob1 /clang:-fno-slp-vectorize -mllvm -switch-to-lookup=false
+#include "slinky/engine.h"
+#include "slinky/jcall.h"
+extern "C" char gui_module_descriptor[];   // the client window itself, kept out of the module card list
+typedef void (*Handler)(void *event);
+struct Module;
+struct Reg { Module **list; unsigned long long n; };
+struct Mgr {
+    Module **mods; unsigned long long count; Reg cat[5];   // +0x10: modules per category
+    Reg reg[27];                        // +0x060: modules that implement each event type
+    Handler *lists[27];                 // +0x210: NULL-terminated handler list per event type
+    // Pending enable/disable queue capacity. This was hard-coded to 0x45 (69) in three places while the
+// module table grew past it, and every module past that index silently refused to enable.
+#define MODULE_QUEUE_CAP 128
+Module **en_list; unsigned long long en_count;    // +0x2e8 pending enables
+    Module **dis_list; unsigned long long dis_count;  // +0x2f8 pending disables
+    void (*set308)(void *mod, int v);   // +0x308
+};
+// The manager lives in a fixed 784-byte block of the data image, so the deferred enable
+// batch cannot be stored inside it; it is file-local instead.
+// Modules this rebuild adds on top of the shipped 0x43.
+extern "C" char bed_esp_module_descriptor[];
+extern "C" char sw2_module_descriptor[];   // keyboard-driven SafeWalk
+extern "C" char safe_walk_module_descriptor[];   // the built-in one, replaced below
+extern "C" char timer_advance_module_descriptor[];   // Raven-style timer with presets
+extern "C" char stasis_module_descriptor[];          // freeze/pulse
+extern "C" char kill_aura_module_descriptor[];         // B4-style kill aura
+extern "C" char speed_module_descriptor[];            // B4-style speed
+extern "C" char fly_module_descriptor[];              // B4-style fly (FAST mode)
+extern "C" char tpaura_module_descriptor[];           // B4-style tp aura
+
+// ~/.slinky/dev. Without that marker the module table simply ends at Bed ESP, and nothing in the menu can
+// reach it.
+extern "C" int slinky_dev_mode = 0;
+extern "C" void *java_natives_world_module_manager;
+extern "C" const char str_slinky_in_profiles[];
+extern "C" int settings_path(char **path);
+extern "C" int settings_path_append(char **path, const char *suffix);
+extern "C" int read_text_file(char **path, char **data);
+extern "C" void libc_free(void *ptr);
+extern "C" void slinky_logf(const char *fmt, ...);
+
+// Read the -dev marker with Win32 directly.
+//
+// The first attempt used the client's settings helpers (settings_path / read_text_file). Those belong to the
+// settings layer, which is not initialised yet when the module manager is constructed, and calling them from
+// here made unrelated modules behave erratically. CreateFile on %USERPROFILE%\.slinky\dev has no such
+// dependency: it touches nothing but the filesystem, so it is safe at this point in startup.
+
+// Runtime dev gate. Called once, from the GUI init path, where the settings layer is already up - reading the
+// marker from create_module_manager was the mistake that destabilised unrelated modules.
+//
+// is removed from the category lists here, so it never reaches the menu.
+
+
+
+
+
+static Module *deferred_enable[MODULE_QUEUE_CAP];
+static unsigned long long deferred_enable_n;
+// Same for disables: a batch queued on the main menu still owes its release_owner call.
+static Module *deferred_disable[MODULE_QUEUE_CAP];
+static unsigned long long deferred_disable_n;
+// Merge a batch into the deferred queue instead of replacing it. Loading two profiles from the
+// main menu queues two batches in consecutive frames, and the second used to overwrite the first:
+// those modules never got their toggle notification and, for disables, never gave the hotbar back.
+// Modules already queued keep their position, so a module that was enabled and then disabled again
+// before a world exists ends up with the notification that matches its final state.
+static void defer_append(Module **queue, unsigned long long *count, Module *mod) {
+    for (unsigned long long i = 0; i < *count; i++)
+        if (queue[i] == mod) return;
+    if (*count >= MODULE_QUEUE_CAP) return;
+    queue[(*count)++] = mod;
+}
+struct HSlot { Handler f; void *x; };
+struct Module { char padding_00[0x10]; unsigned cat; unsigned char enabled; char padding_15[0x33]; HSlot h[27]; };
+// dispatch: call every handler registered for the event's type (first dword of the event)
+extern "C" void dispatch_event(Mgr *manager, unsigned *e) {
+    unsigned type = *e;
+    if (type >= 27) return;
+    Handler *h = manager->lists[type];
+    for (Handler f = *h; f; f = *++h) f(e);
+}
+extern "C" bool is_event_handled(Mgr *manager, unsigned type) {
+    if (type >= 27) return true;
+    return *manager->lists[type] == 0;
+}
+extern "C" bool has_queued_modules(Mgr *manager) { return manager->dis_count != 0 || manager->en_count != 0; }
+extern "C" void apply_module_state(Mgr *manager, void *mod, int v) {
+    auto set308 = manager->set308;
+    asm("" : "+r"(set308));
+    set308(mod, v);
+}
+
+FN(void *, java_get_entity_player_inventory, (void *jvm, void *entity_player));
+FN(int, java_get_inventory_player_current_item, (void *jvm, void *inventory_player));
+FN(void *, java_get_inventory_player_main_inventory, (void *jvm, void *inventory_player));
+FN(void *, java_call_item_stack_get_item, (void *jvm, void *item_stack));
+FN(int, java_call_static_item_get_id_from_item, (void *jvm, void *item));
+// item held in a hotbar slot (0..8) of the entity's inventory
+extern "C" void *item_held_hotbar_slot(Jvm *jvm, void *ent) {
+    void *inv = java_get_entity_player_inventory(jvm, ent);
+    unsigned slot = java_get_inventory_player_current_item(jvm, inv);
+    if (slot > 8) return 0;
+    void *arr = java_get_inventory_player_main_inventory(jvm, inv);
+    jobject st = (*jvm->env)->GetObjectArrayElement(jvm->env, (jobjectArray)arr, slot);
+    if (!st) return 0;
+    return java_call_item_stack_get_item(jvm, st);
+}
+// is the item a sword (ids 267, 268, 272, 276, 283)?
+extern "C" bool item_sword(Jvm *jvm, void *item) {
+    unsigned char r;
+    if (!item) { r = 0; goto out; }
+    {
+    unsigned k = java_call_static_item_get_id_from_item(jvm, item) - 0x10b;
+    if (k <= 0x10) { asm volatile(""); r = (unsigned char)(0x10223u >> k); }
+    else r = 0;
+    }
+out:
+    SHARED_EPILOG();
+    return r & 1;
+}
+
+static inline __attribute__((always_inline)) bool is_code(unsigned short c) {
+    return (unsigned short)(c - 0x61) < 6 | (unsigned short)(c - 0x30) < 10 | c == 0x72;
+}
+// colour code (0-9, a-f, r) in effect before the first name character of a display string, 0 if none
+static inline __attribute__((always_inline)) unsigned prefix_code(Jvm *jvm, jstring s) {
+    JNIEnv *env = jvm->env;
+    if (!s) return 0;
+    jsize len = (*env)->GetStringLength(env, s);
+    if (len <= 0) return 0;
+    const jchar *ch = (const jchar *)(*env)->GetStringCritical(env, s, 0);
+    if (!ch) return 0;
+    unsigned r = 0;
+    bool prev = false;
+    long long i = 0;
+    for (;;) {
+        bool p = prev;
+        unsigned short c = ch[i];
+        prev = c == 0xa7;
+        if (!prev) {
+            if (p) {
+                if ((unsigned short)(c - 0x30) < 10) r = c;
+                if ((unsigned short)(c - 0x61) < 6) r = c;
+                if (c == 0x72) r = c;
+            } else {
+                if (c == 0x5f || (unsigned short)(c - 0x30) < 10 || (unsigned short)((c & 0xffdf) - 0x41) < 0x1a)
+                    break;
+            }
+        }
+        i++;
+        if (i >= (long long)len) { r = 0; break; }
+    }
+    (*env)->ReleaseStringCritical(env, s, ch);
+    return r;
+}
+// last colour code (0-9, a-f, r) of a display string, 'f' if none
+static inline __attribute__((always_inline)) unsigned short last_code(Jvm *jvm, jstring s) {
+    unsigned short res = 0x66;
+    JNIEnv *env = jvm->env;
+    jsize len = (*env)->GetStringLength(env, s);
+    if (!len) return res;
+    const jchar *ch = (const jchar *)(*env)->GetStringCritical(env, s, 0);
+    if (!ch) return res;
+    if (len > 0) {
+        unsigned cand = 0;
+        unsigned char valid = 0;
+        for (unsigned long long k = (unsigned)len + 1; ; ) {
+            unsigned short c = ch[k - 2];
+            if (c != 0xa7) {
+                valid = is_code(c);
+                if (valid) cand = c;
+            } else {
+                if (valid & 1) { res = (unsigned short)cand; break; }
+                valid = 0;
+            }
+            k--;
+            if (k <= 1) break;
+        }
+    }
+    (*env)->ReleaseStringCritical(env, s, ch);
+    return res;
+}
+extern "C" unsigned name_prefix_code(Jvm *jvm, jstring s) { return prefix_code(jvm, s); }
+FN(jstring, java_get_score_player_team, (Jvm *jvm, void *score_player_team));
+extern "C" unsigned short name_last_code(Jvm *jvm, void *object) {
+    jstring score_player_team = java_get_score_player_team(jvm, object);
+    if (!score_player_team) return 0x66;
+    return last_code(jvm, score_player_team);
+}
+FN(jstring, java_call_entity_get_command_sender_name, (Jvm *jvm, void *ent));
+FN(void *, java_jni_is_instance_of_entity_living_base, (Jvm *jvm, void *ent));
+FN(void *, java_call_entity_living_base_get_team, (Jvm *jvm, void *entity_living_base));
+FN(void *, java_jni_is_instance_of_score_player_team, (Jvm *jvm, void *candidate));
+// entity name colour: prefix code of the display name, else the team colour, else 'f'
+extern "C" unsigned short entity_name_colour(Jvm *jvm, void *ent) {
+    unsigned short r = (unsigned short)prefix_code(jvm, java_call_entity_get_command_sender_name(jvm, ent));
+    if (r) return r;
+    void *entity_living_base = java_jni_is_instance_of_entity_living_base(jvm, ent);
+    if (!entity_living_base) return 0x66;
+    void *entity_living_base_get_team = java_call_entity_living_base_get_team(jvm, entity_living_base);
+    if (!entity_living_base_get_team) return 0x66;
+    void *score_player_team = java_jni_is_instance_of_score_player_team(jvm, entity_living_base_get_team);
+    if (!score_player_team) return 0x66;
+    jstring s = java_get_score_player_team(jvm, score_player_team);
+    if (!s) return 0x66;
+    return last_code(jvm, s);
+}
+
+// apply pending enables/disables: rebuild the handler lists of the affected event types, fire event 5
+// Same layout as the context the frame code builds (java_natives_frame.cpp): toggle handlers read the game
+// objects, so these first fields have to line up.
+struct HCtx { void *jvm; Mgr *module_manager; void *profile_list; void *minecraft; void *world; void *player; };
+struct ToggleEvent { long long type; HCtx *ctx; Module *mod; unsigned char on; char rest[0x2f]; };
+FN(void, release_owner, (void *timer));
+static inline __attribute__((always_inline)) unsigned long long handler_mask(Module *module) {
+    unsigned long long mask = 0;
+#pragma clang loop unroll_count(3)
+    for (unsigned t = 0; t < 27; t++)
+        if (module->h[t].f) mask |= 1u << t;
+    return mask;
+}
+static inline __attribute__((always_inline)) void rebuild(Mgr *manager, unsigned long long mask) {
+#pragma clang loop unroll(disable)
+    for (unsigned long long t = 0; t != 27; t++) {
+        if (!((mask >> t) & 1)) continue;
+        Handler *out = manager->lists[t];
+        Reg *r = &manager->reg[t];
+#pragma clang loop unroll_count(2)
+        for (unsigned long long i = 0; i < r->n; i++) {
+            Module *mod = r->list[i];
+            if (mod->enabled == 1 && mod->h[t].f) *out++ = mod->h[t].f;
+        }
+        *out = 0;
+    }
+}
+extern "C" void apply_module_toggles(HCtx *ctx) {
+    Mgr *manager = ctx->module_manager;
+    // The handlers can touch the game objects: Block In's enable reads the local player's rotation, and the
+    // start-up queue (modules with flags bit 1) is applied on the first frame, which on a fresh launch is
+    // the main menu, where Minecraft.thePlayer/theWorld are NULL. Keeping the queue until the first frame
+    // that has both is what the tick path already does (tick_modules has the same check); applying it
+    // against a NULL player faulted in jni_fast_GetFloatField.
+    // The enabled flags and the handler tables are pure bookkeeping: they never touch a game
+    // object, so they are applied unconditionally. That matters on the main menu, where the
+    // HUD has to draw with no world and no player: the render lists were left empty because
+    // this function returned early, so is_event_handled() reported "nobody listens" for the
+    // 3D and 2D events and render_world_events() skipped both passes entirely.
+    // Only the toggle notifications below reach into the game (Block In's enable reads the
+    // local player's rotation), and those stay deferred until a world and a player exist.
+    bool game_ready = ctx->world && ctx->player;
+    if (manager->en_count) {
+        unsigned long long mask = 0;
+        unsigned long long n = manager->en_count;
+        for (unsigned long long i = 0; i != n; i++) {
+            Module *mod = manager->en_list[i];
+            mod->enabled = 1;
+            mask |= handler_mask(mod);
+        }
+        rebuild(manager, mask);
+        if (game_ready) {
+            for (unsigned long long i = 0; i < n; i++) {
+                ToggleEvent e = {5, ctx, manager->en_list[i], 1, {}};
+                Handler *h = ctx->module_manager->lists[5];
+                for (Handler f = *h; f; f = *++h) f(&e);
+            }
+            manager->en_count = 0;
+        } else {
+            // No world yet: the modules are on and their handlers are wired, but the
+            // toggle notifications have to wait (they read game objects). Remember the
+            // batch so it is announced on the first frame that has a player and a world.
+            for (unsigned long long i = 0; i < n; i++) defer_append(deferred_enable, &deferred_enable_n, manager->en_list[i]);
+            manager->en_count = 0;
+        }
+        manager = ctx->module_manager;
+    } else if (game_ready && deferred_enable_n) {
+        // A batch queued on the main menu is announced now that the game is ready.
+        unsigned long long n = deferred_enable_n;
+        deferred_enable_n = 0;
+        for (unsigned long long i = 0; i < n; i++) {
+            ToggleEvent e = {5, ctx, deferred_enable[i], 1, {}};
+            Handler *h = ctx->module_manager->lists[5];
+            for (Handler f = *h; f; f = *++h) f(&e);
+        }
+    }
+    if (manager->dis_count) {
+        unsigned long long mask = 0;
+        unsigned long long n = manager->dis_count;
+        // rebuild() overwrites the list buffers in place and only keeps modules with enabled == 1,
+        // so once the flags below are cleared the type 5 list no longer holds the handlers of the
+        // modules being switched off. The toggle notification still has to reach them (the GUI
+        // frees the mouse and saves the settings from its own handler), so copy the list first.
+        Handler saved[64];
+        unsigned saved_n = 0;
+        for (Handler *h = manager->lists[5]; *h && saved_n < 64; h++) saved[saved_n++] = *h;
+        for (unsigned long long i = 0; i != n; i++) {
+            Module *mod = manager->dis_list[i];
+            mod->enabled = 0;
+            mask |= handler_mask(mod);
+        }
+        rebuild(manager, mask);
+        if (game_ready) {
+            for (unsigned long long i = 0; i < n; i++) {
+                Module *mod = manager->dis_list[i];
+                ToggleEvent e = {5, ctx, mod, 0, {}};
+                for (unsigned k = 0; k < saved_n; k++) saved[k](&e);
+                release_owner(mod);
+            }
+        } else {
+            // No world yet. The module is already off and out of the handler tables, but
+            // release_owner still has to run: it hands the hotbar back (rotation_and_hotbar_ticks),
+            // which the module managers take on enable. Dropping the batch here left a module
+            // switched off on the main menu still claiming ownership, so the automatic hotbar
+            // switching of everything else stalled. Remember it for the first frame with a world.
+            for (unsigned long long i = 0; i < n; i++) defer_append(deferred_disable, &deferred_disable_n, manager->dis_list[i]);
+        }
+        manager->dis_count = 0;
+    } else if (game_ready && deferred_disable_n) {
+        // A disable batch queued on the main menu is released now that the game is ready.
+        unsigned long long n = deferred_disable_n;
+        deferred_disable_n = 0;
+        for (unsigned long long i = 0; i < n; i++) {
+            Module *mod = deferred_disable[i];
+            ToggleEvent e = {5, ctx, mod, 0, {}};
+            Handler *h = manager->lists[5];
+            for (Handler f = *h; f; f = *++h) f(&e);
+            release_owner(mod);
+        }
+    }
+}
+
+// manager constructor: copy the static module table, bucket modules by category and by implemented event
+FN(void *, libc_memset, (void *dest, int c, unsigned long long n));          // memset
+FN(void *, libc_calloc, (unsigned long long n, unsigned long long size));  // calloc
+FN(void *, libc_memcpy_alt, (void *dest, const void *src, unsigned long long n));  // memcpy
+FN(void, libc_qsort, (void *base, unsigned long long n, unsigned long long size, int (*cmp)(const void *, const void *)));   // qsort
+extern "C" Module *const ptr_to_aim_assist_module_descriptor[0x43];
+extern "C" unsigned module_manager_count;
+FN(int, compare_module_slots, (const void *left, const void *right));
+extern "C" int create_module_manager(Mgr *manager, void (*setter)(void *mod, int v)) {
+    libc_memset(manager->cat, 0, 0x300);
+    // file this early is not reliable and a silent "module simply does not exist" is far worse than shipping an
+    // unfinished module. The -dev flag still writes the marker and is logged below.
+    // means calling settings_path / read_text_file during module-manager construction, which happens before the
+    // settings layer is ready. That was the only change in this function and it made unrelated modules (left
+    // click among them) behave erratically. The gate is applied at run time instead - see scaffold_dev_enabled.
+    unsigned long long total = 0x4a;
+    manager->count = (unsigned)total;
+    manager->mods = (Module **)libc_calloc(total, 8);
+    if (!manager->mods) return 0x3ed;
+    libc_memcpy_alt(manager->mods, ptr_to_aim_assist_module_descriptor, 0x218);
+
+    // Replace the built-in SafeWalk in place. It drives safe_walk_safe_walk_active, which stops the player at
+    // the edge without pressing the sneak key, and a server sees that as movement that stops for no visible
+    // reason. The replacement presses the real key.
+    //
+    // 0x39 is the index of safe_walk_module_descriptor inside ptr_to_aim_assist_module_descriptor, read out of
+    // rdata.s. Replacing in place keeps the table length the same: the count loop and the fill loop below both
+    // run to `total`, and a mismatch leaves a module that is counted but never dispatched.
+    manager->mods[0x39] = (Module *)sw2_module_descriptor;
+    slinky_logf("mods: safe_walk replaced at slot 0x39 -> %s", *(const char **)sw2_module_descriptor);
+
+    manager->mods[0x43] = (Module *)bed_esp_module_descriptor;
+    manager->mods[0x44] = (Module *)timer_advance_module_descriptor;
+    manager->mods[0x45] = (Module *)stasis_module_descriptor;
+    manager->mods[0x46] = (Module *)kill_aura_module_descriptor;
+    manager->mods[0x47] = (Module *)speed_module_descriptor;
+    manager->mods[0x48] = (Module *)fly_module_descriptor;
+    manager->mods[0x49] = (Module *)tpaura_module_descriptor;
+    slinky_logf("mods: total=%llu killaura=%s speed=%s stasis=%s", total,
+                *(const char **)kill_aura_module_descriptor,
+                *(const char **)speed_module_descriptor,
+                *(const char **)stasis_module_descriptor);
+#pragma clang loop unroll(disable)
+    for (unsigned long long i = 0; i != total; i++) {
+        Module *mod = manager->mods[i];
+        *(unsigned long long *)((char *)manager + 0x18 + ((unsigned long long)mod->cat << 4)) += 1;
+        for (unsigned t = 0; t < 27; t++)
+            if (mod->h[t].f) manager->reg[t].n++;
+    }
+    for (int c = 0; c < 5; c++) {
+        unsigned long long n = manager->cat[c].n;
+        if (n) {
+            manager->cat[c].list = (Module **)libc_calloc(n, 8);
+            if (!manager->cat[c].list) return 0x3ed;
+        } else {
+            manager->cat[c].list = 0;   // empty category: calloc(0) is implementation-defined
+        }
+        manager->cat[c].n = 0;
+    }
+#pragma clang loop unroll(disable)
+    for (int t = 0; t < 27; t++) {
+        unsigned long long n = manager->reg[t].n;
+        if (n) {
+            manager->reg[t].list = (Module **)libc_calloc(n, 8);
+            if (!manager->reg[t].list) return 0x3ed;
+        } else {
+            manager->reg[t].list = 0;
+        }
+        manager->lists[t] = (Handler *)libc_calloc(n + 1, 8);
+        if (!manager->lists[t]) return 0x3ed;
+        manager->reg[t].n = 0;
+    }
+    manager->en_list = (Module **)libc_calloc(MODULE_QUEUE_CAP, 8);
+    if (!manager->en_list) return 0x3ed;
+    manager->dis_list = (Module **)libc_calloc(MODULE_QUEUE_CAP, 8);
+    if (!manager->dis_list) return 0x3ed;
+#pragma clang loop unroll(disable)
+    for (unsigned long long i = 0; i != total; i++) {
+        Module *mod = manager->mods[i];               // must match the counting loop above, or the two
+        Reg *cr = &manager->cat[mod->cat];            // added modules are counted but never registered
+        unsigned long long cn = cr->n;
+        cr->list[cn] = mod;
+        cr->n = cn + 1;
+        for (unsigned t = 0; t < 27; t++)
+            if (mod->h[t].f) {
+                unsigned long long rn = manager->reg[t].n;
+                manager->reg[t].list[rn] = mod;
+                manager->reg[t].n = rn + 1;
+            }
+    }
+#pragma clang loop unroll(disable)
+    for (unsigned t = 0; t != 27; t++) {
+        module_manager_count = t;
+        libc_qsort(manager->reg[t].list, manager->reg[t].n, 8, compare_module_slots);
+    }
+    manager->set308 = setter;
+    return 0;
+}
+
+// queue a module enable/disable (applied by apply_module_toggles); a disable is announced first (event 4) and can be
+// cancelled by a handler setting the event's flag
+struct QEvent { int type; int padding_04; Module *mod; unsigned char cancel; char rest[0x37]; };
+extern "C" bool queue_module_toggle(Mgr *module_manager, Module *module, unsigned char enabled) {
+    if (module->enabled == enabled) return true;
+    Module ***list;
+    if (enabled) {
+        list = &module_manager->en_list;
+    } else {
+        QEvent ev = {};
+        ev.type = 4;
+        ev.mod = module;
+        Handler *h = module_manager->lists[4];
+        if (*h) {
+            for (Handler f = *h; f; f = *++h) f((unsigned *)&ev);
+            if (ev.cancel & 1) return false;
+        }
+        list = &module_manager->dis_list;
+    }
+    unsigned long long *n = (unsigned long long *)(list + 1);
+    if (*n >= MODULE_QUEUE_CAP) return false;   // en_list/dis_list capacity
+    (*list)[(*n)++] = module;
+    return true;
+}
+FN(void *, get_block_state_id, (Jvm *jvm, void *a1));
+FN(jint, get_block_id, (Jvm *jvm, void *a1));
+extern "C" bool block_entity_id(Jvm *jvm, void *ent) {
+    bool r = false;
+    if (ent) {
+        void *block_state_id = get_block_state_id(jvm, ent);
+        if (block_state_id) r = get_block_id(jvm, block_state_id) != 0;
+    }
+    SHARED_EPILOG();
+    return r;
+}
+
+// ---- gap-scan functions of the manager block ----
+// sort comparator: descending by the int in slot `module_manager_count` (slots are 16 bytes, starting at +0x50)
+struct SortSlot { int v; int padding_04[3]; };
+struct SortRec { char padding_00[0x50]; SortSlot k[1]; };
+extern "C" int compare_module_slots(const void *pa, const void *pb) {
+    SortRec **a = (SortRec **)pa, **b = (SortRec **)pb;
+    SortRec *rb = *b;
+    unsigned i = module_manager_count;
+    return rb->k[i].v - (*a)->k[i].v;
+}
+
+// module manager destructor: free every list the constructor (create_module_manager) allocated
+FN(void, libc_free, (void *ptr));
+#define RELEASE(p)         \
+    do {                   \
+        if (p) {           \
+            libc_free(p);  \
+            p = 0;         \
+        }                  \
+    } while (0)
+extern "C" void destroy_module_manager(Mgr *manager) {
+    RELEASE(manager->mods);
+    for (int i = 0; i < 5; i++) RELEASE(manager->cat[i].list);
+#pragma clang loop unroll(disable)
+    for (int i = 0; i < 27; i++) RELEASE(manager->reg[i].list);
+#pragma clang loop unroll(disable)
+    for (int i = 0; i < 27; i++) RELEASE(manager->lists[i]);
+    RELEASE(manager->en_list);
+    RELEASE(manager->dis_list);
+}
+
+// Minecraft formatting codes in a (modified UTF-8) name: returns the last colour code (0-9, a-f; 'r' resets to 'f')
+// seen before the first visible character (letter, digit or '_'); *hasText tells whether there was one.
+// "搂" arrives as the byte pair C2 A7.
+FN(unsigned long long, libc_strlen, (const char *str));
+extern "C" int last_text_color_code(const char *s, int colour, bool *hasText) {
+    *hasText = false;
+    unsigned long long n = libc_strlen(s);
+    bool sawC2 = false, afterSign = false;
+    for (unsigned long long i = 0; i != n; i++) {
+        signed char c = s[i];
+        if (afterSign) {
+            signed char code = c == 'r' ? 'f' : c;
+            if ((unsigned short)(c - '0') < 10) colour = code;
+            if ((unsigned short)(c - 'a') < 6) colour = code;
+            if (c == 'r') colour = code;
+            afterSign = false;
+        } else if (sawC2) {
+            if ((unsigned char)c == 0xa7) {
+                afterSign = true;
+                sawC2 = false;
+            } else {
+                sawC2 = (unsigned char)c == 0xc2;
+            }
+        } else {
+            if ((unsigned char)c == 0xc2) {
+                sawC2 = true;
+                continue;
+            }
+            if (c == '_' || (unsigned short)(c - '0') < 10 || (unsigned short)((c & 0xdf) - 'A') <= 25) {
+                *hasText = true;
+                return colour;
+            }
+        }
+    }
+    return colour;
+}
+

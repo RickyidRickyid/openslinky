@@ -1,0 +1,13 @@
+﻿# build output, if anyone ever builds in-tree
+build/
+out/
+*.obj
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.res
+# editor junk
+.vscode/
+.idea/
+*.swp

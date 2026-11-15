@@ -1,0 +1,19 @@
+LIBRARY gdi32.dll
+EXPORTS
+CreateCompatibleDC
+CreateDIBSection
+SelectObject
+DeleteObject
+DeleteDC
+BitBlt
+Ellipse
+MoveToEx
+LineTo
+Polyline
+Rectangle
+SetTextColor
+TextOutW
+GetStockObject
+SetBkMode
+CreatePen
+CreateSolidBrush
