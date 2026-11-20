@@ -4,10 +4,7 @@
 产物是一个原生 DLL，经 **JVMTI** 注入 JVM，在游戏进程内挂接模块（战斗 / 移动 / 视觉 / 工具），
 外加一个把 DLL 内嵌在自身的单文件注入器。
 
-> **给接手的人**：这份 README 是入口。改动历史、逐条踩坑记录、JNI 原语清单在
-> [`交接文档-2026-11-14.md`](交接文档-2026-11-14.md)；会话叙事在
-> [`对话上下文-交给新会话.md`](对话上下文-交给新会话.md)；Bed ESP 的下一步设计在
-> [`BEDESP-下一步-按区块扫描.md`](BEDESP-下一步-按区块扫描.md)。
+> **给接手的人**：这份文档是入口，覆盖构建、注入、验证与各模块定位。
 > 读完这一份就能构建、验证、定位任何模块。
 
 | | |
@@ -39,7 +36,6 @@ src/
   platform/                 GL 槽加载、NanoVG 名称绑定、crt 与数学导出
 injector/                   注入器：main / tui / inject_windows
 third_party/                nanovg、GL 头、minicrt
-experimental/               未参与编译的实验实现（毛玻璃、overlay）—— 见文件头说明
 ```
 
 **分层约定**：`engine/` 只做「把游戏的能力暴露出来」，`logic/` 只做「模块行为」。
@@ -267,7 +263,7 @@ apply_silent_rotation(Rot{ wrap_angle(want.yaw - wrap_angle(e.yaw + o.yaw)),
 `DIAG` 残留 0、`drawing` 稳定在 4–6。
 
 **已知边界**：走动超过半个 range 仍会重建一次索引（r=32 约 0.45 s，r=64 约 1.7 s）。
-彻底消除的做法见 `BEDESP-下一步-按区块扫描.md`：用 `kind 1` 喂区块队列，一个区块只扫一次（16×16×33）。
+彻底消除的做法是用 `kind 1` 喂区块队列，一个区块只扫一次（16×16×33）。
 
 ---
 
@@ -280,7 +276,6 @@ apply_silent_rotation(Rot{ wrap_angle(want.yaw - wrap_angle(e.yaw + o.yaw)),
 ```
 include/slinky/gui_frosted.h   第 9 行  SLINKY_FROSTED_GUI   0 = 原来的平灰底   1 = 毛玻璃（当前 1）
 src/engine/gui/gui_frosted.cpp           捕获 / 降采样 / 模糊 / 上传 / 绘制 / 释放
-交付-毛玻璃-2026-11-14.md                接入说明与验收步骤
 ```
 
 改完开关必须重链 exe（§3）。关掉时整个文件编成三个空函数，行为与改动前完全一致。
