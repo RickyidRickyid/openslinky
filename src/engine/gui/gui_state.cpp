@@ -1,4 +1,4 @@
-﻿// 0x11000: GUI state helpers (drag state at +0x370, flags at +0x4c8..)
+// 0x11000: GUI state helpers (drag state at +0x370, flags at +0x4c8..)
 #include "slinky/engine.h"
 #include "slinky/gui_frosted.h"
 #include "slinky/gui_state.h"
@@ -174,6 +174,7 @@ FN(bool, get_profile_dirty, ());
 FN(const char *, get_saved_string, ());
 FN(int, libc_strcmp, (const char *left, const char *right));   // strcmp
 FN(int, load_profile_name, (const char *name, void *mgr));       // load profile
+FN(int, open_profiles_folder, ());                              // open %USERPROFILE%\.slinky\profiles
 FN(int, save_profile, (const char *name, bool text, void *mgr));   // save profile
 FN(V4t, nvg_trans_rgba_f, (V4t c, float k));
 FN(void, file_name_text_filter, (char *buf, char character));
@@ -291,8 +292,16 @@ extern "C" void draw_gui_frame(GuiState *gui, GWin *window, void *mgr, void *pro
             for (unsigned j = 0; j != 4; j++) {   // load, save, open folder, delete
                 R16t b = make_rect(t.x + t.w - (float)(int)(20 * (4 - j)) - (float)(int)(12 * (3 - j)), t.y,
                                  row_height_20_in_gui_state_a, 20.0f);
+                // Buttons: 0 load, 1 save, 2 open folder, 3 delete.
+                //   load        works on the Default row too (it resets everything)
+                //   save/delete need a real profile in the row
+                //   open folder  needs nothing at all - it opens %USERPROFILE%\.slinky\profiles
+                // The condition used to be (ent || !j), which enabled load only, so "open folder"
+                // stayed grey and unclickable on the Default row - and on a fresh install that is
+                // the only row there is, which made the button permanently dead.
+                bool row_action = (j == 0) || (j == 2) || (ent != 0);
                 float alpha = half_in_gui_state;
-                if (ent || !j) {
+                if (row_action) {
                     alpha = one;
                     if (mouse_over_rect_r_local(gui, b)) {
                         set_slider_text(gui, window, (const char *)gui_state_tooltip_strings_as_offsets_from + gui_state_tooltip_strings_as_offsets_from[j],
@@ -330,8 +339,11 @@ extern "C" void draw_gui_frame(GuiState *gui, GWin *window, void *mgr, void *pro
                                 ask_sure_before_running_action(gui, mgr, profiles, name, 1);
                                 goto icon;
                             case 2:
-                                ask_sure_before_running_action(gui, mgr, profiles, name, 2);
-                                goto icon;
+                                // No confirmation: opening a folder changes nothing, and the dialog
+                                // would have to name a profile - on the Default row there is none, so
+                                // it would format a NULL into "Open folder for profile '%s'?".
+                                error_code = open_profiles_folder();
+                                goto result;
                             case 3:
                                 if (ent) {
                                     ask_sure_before_running_action(gui, mgr, profiles, name, 3);

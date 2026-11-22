@@ -241,6 +241,11 @@ static void write_language(const std::string &language) {
     std::wstring dir(profile, n);
     dir += L"\\.slinky";
     CreateDirectoryW(dir.c_str(), nullptr);
+    // The profiles folder too. The client's "open profiles folder" button used to fail on a fresh
+    // install because nothing had ever created this directory - the DLL creates it now as well, but
+    // having it from the first injection means the folder is simply there when someone looks.
+    std::wstring profiles = dir + L"\\profiles";
+    CreateDirectoryW(profiles.c_str(), nullptr);
     std::wstring path = dir + L"\\language";
     HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                               FILE_ATTRIBUTE_NORMAL, nullptr);

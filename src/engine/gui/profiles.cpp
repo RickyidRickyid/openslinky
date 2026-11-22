@@ -19,6 +19,7 @@ FN(void, set_saved_string, (const char *s));
 extern "C" const char str_slinky_in_profiles[], str_profiles[];
 extern "C" unsigned char settings_dirty_flag;
 
+FN(void, slinky_logf, (const char *fmt, ...));
 extern "C" int save_last_profile(const char *name);     // defined at the bottom of this file
 extern "C" int load_last_profile(Mods *mods);
 
@@ -207,8 +208,16 @@ extern "C" int open_profiles_folder() {   // open the profiles folder
     char *path;
     int error_code = settings_path(&path);
     if (error_code) return error_code;
-    if ((error_code = settings_path_append(&path, str_slinky_in_profiles)) == 0 && (error_code = settings_path_append(&path, str_profiles)) == 0)
+    // Create the folders before opening them. Without the two ensure calls this only ever worked
+    // for someone who had already saved a profile - a fresh install has no %USERPROFILE%\.slinky\
+    // profiles\ at all, ShellExecuteW("explore") fails on a missing path, and the button appeared
+    // to do nothing. list_profiles has always ensured them; this one did not.
+    if ((error_code = settings_path_append(&path, str_slinky_in_profiles)) == 0 &&
+        (error_code = settings_path_ensure(&path)) == 0 &&
+        (error_code = settings_path_append(&path, str_profiles)) == 0 &&
+        (error_code = settings_path_ensure(&path)) == 0)
         error_code = open_path_explorer(&path);
+    slinky_logf("profiles: open folder -> %d", error_code);
     free_path(&path);
     return error_code;
 }
