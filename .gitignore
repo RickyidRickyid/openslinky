@@ -1,4 +1,4 @@
-﻿# build output, if anyone ever builds in-tree
+# build output, if anyone ever builds in-tree
 build/
 out/
 *.obj
@@ -11,3 +11,6 @@ out/
 .vscode/
 .idea/
 *.swp
+# in-tree CMake checks and scratch build dirs
+build_check/
+build-*/
