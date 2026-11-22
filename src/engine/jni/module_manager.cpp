@@ -1,4 +1,4 @@
-﻿// 0x28000: module manager - per-event handler lists, dispatch, small item helpers
+// 0x28000: module manager - per-event handler lists, dispatch, small item helpers
 // cflags: /Ob1 /clang:-fno-slp-vectorize -mllvm -switch-to-lookup=false
 #include "slinky/engine.h"
 #include "slinky/jcall.h"
@@ -21,6 +21,7 @@ Module **en_list; unsigned long long en_count;    // +0x2e8 pending enables
 // batch cannot be stored inside it; it is file-local instead.
 // Modules this rebuild adds on top of the shipped 0x43.
 extern "C" char bed_esp_module_descriptor[];
+extern "C" char bed_plates_module_descriptor[];
 extern "C" char sw2_module_descriptor[];   // keyboard-driven SafeWalk
 extern "C" char safe_walk_module_descriptor[];   // the built-in one, replaced below
 extern "C" char timer_advance_module_descriptor[];   // Raven-style timer with presets
@@ -29,6 +30,7 @@ extern "C" char kill_aura_module_descriptor[];         // B4-style kill aura
 extern "C" char speed_module_descriptor[];            // B4-style speed
 extern "C" char fly_module_descriptor[];              // B4-style fly (FAST mode)
 extern "C" char tpaura_module_descriptor[];           // B4-style tp aura
+extern "C" char bow_aim_assist_module_descriptor[];   // Drip-style bow aim assist
 
 // ~/.slinky/dev. Without that marker the module table simply ends at Bed ESP, and nothing in the menu can
 // reach it.
@@ -236,8 +238,21 @@ static inline __attribute__((always_inline)) void rebuild(Mgr *manager, unsigned
         *out = 0;
     }
 }
+FN(int, load_last_profile, (void *mods));
+
 extern "C" void apply_module_toggles(HCtx *ctx) {
     Mgr *manager = ctx->module_manager;
+
+    // Restore the profile that was in use last time, once, on the first frame that has a world.
+    // Deferred to here on purpose: create_module_manager runs before the settings layer exists.
+    {
+        static unsigned char restored;
+        if (!restored && ctx->world && ctx->player) {
+            restored = 1;
+            int rc = load_last_profile(manager);
+            slinky_logf("mods: restore last profile -> %d", rc);
+        }
+    }
     // The handlers can touch the game objects: Block In's enable reads the local player's rotation, and the
     // start-up queue (modules with flags bit 1) is applied on the first frame, which on a fresh launch is
     // the main menu, where Minecraft.thePlayer/theWorld are NULL. Keeping the queue until the first frame
@@ -346,7 +361,7 @@ extern "C" int create_module_manager(Mgr *manager, void (*setter)(void *mod, int
     // means calling settings_path / read_text_file during module-manager construction, which happens before the
     // settings layer is ready. That was the only change in this function and it made unrelated modules (left
     // click among them) behave erratically. The gate is applied at run time instead - see scaffold_dev_enabled.
-    unsigned long long total = 0x4a;
+    unsigned long long total = 0x4c;
     manager->count = (unsigned)total;
     manager->mods = (Module **)libc_calloc(total, 8);
     if (!manager->mods) return 0x3ed;
@@ -369,6 +384,8 @@ extern "C" int create_module_manager(Mgr *manager, void (*setter)(void *mod, int
     manager->mods[0x47] = (Module *)speed_module_descriptor;
     manager->mods[0x48] = (Module *)fly_module_descriptor;
     manager->mods[0x49] = (Module *)tpaura_module_descriptor;
+    manager->mods[0x4a] = (Module *)bow_aim_assist_module_descriptor;
+    manager->mods[0x4b] = (Module *)bed_plates_module_descriptor;
     slinky_logf("mods: total=%llu killaura=%s speed=%s stasis=%s", total,
                 *(const char **)kill_aura_module_descriptor,
                 *(const char **)speed_module_descriptor,

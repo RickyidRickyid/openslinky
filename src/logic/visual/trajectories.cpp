@@ -59,6 +59,7 @@ extern "C" void (**ptr_to_pGlVertexPointer)(int, unsigned, int, const void *); /
 extern "C" void (**ptr_to_pGlDrawArrays)(unsigned, int, int);               // glDrawArrays
 
 FN(unsigned char, is_silent_rotation_active, ());
+extern "C" Rot get_silent_rotation();   // the rotation the renderer is actually using
 FN(void *, get_game_settings, (void *jvm, void *object));
 FN(int, java_get_game_settings_third_person_view, (void *jvm, void *game_settings));
 FN(void *, item_held_hotbar_slot, (void *jvm, void *slot));
@@ -127,7 +128,10 @@ extern "C" void trajectories_tick(Hook *hook) {
     int why = 0;
     static int last_why;
     if (ctx->in_game != 1) { why = 1; goto none; }
-    if (is_silent_rotation_active()) { why = 2; goto none; }
+    // Silent rotation used to abort the whole pass here. That is what made the arc vanish as soon
+    // as anything took the rotation over (Bow Aim Assist, Aim Assist's silent mode). The arc is
+    // still meaningful while the rotation is silent - it just has to start from the silent
+    // rotation, which is what the two get_rotation calls below do.
     if (java_get_game_settings_third_person_view(ctx->jvm, get_game_settings(ctx->jvm, ctx->minecraft))) { why = 3; goto none; }
     {
         void *stack = item_held_hotbar_slot(ctx->jvm, ctx->player);
@@ -170,7 +174,9 @@ extern "C" void trajectories_tick(Hook *hook) {
     {
         static int sim_logged;
         if (!sim_logged) { sim_logged = 1; slinky_logf("traj: simulating item=%d pearl=%d thrown=%d", item_id, pearl, thrown); }
-        Rot rot = get_entity_rotation(ctx->jvm, ctx->player);
+        // Start from whatever the renderer is showing: while a module holds the rotation silently
+        // that is the silent rotation, otherwise the entity's own.
+        Rot rot = is_silent_rotation_active() ? get_silent_rotation() : get_entity_rotation(ctx->jvm, ctx->player);
         Vec3 position = java_get_entity_pos_x(ctx->jvm, ctx->player);
         Vec3 pt, vel;
         throwable_velocity(ctx, &position, rot, 0.0f, &pt, &vel);
@@ -249,7 +255,7 @@ extern "C" void trajectories_render(RenderEvt *h) {
     if (!trajectories_path_length)
         return;
     Ctx *ctx = h->ctx;
-    Rot rot = get_entity_rotation(ctx->jvm, ctx->player);
+    Rot rot = is_silent_rotation_active() ? get_silent_rotation() : get_entity_rotation(ctx->jvm, ctx->player);
     Vec3 pos = java_get_entity_pos_x(ctx->jvm, ctx->player);
     Vec3 prev = java_get_entity_prev_pos_x(ctx->jvm, ctx->player);
     Vec3 start = vec3_lerp(prev, pos, (double)h->partial);

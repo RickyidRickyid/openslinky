@@ -609,3 +609,11 @@ extern "C" ModuleDescriptor bed_esp_module_descriptor = {
     bed_esp_register,
     0,
 };
+// Exposed for Bed Plates. That module needs the same bed list and has no business running a second
+// chunk sweep of its own - Bed ESP already keeps it current through the chunk and block events.
+extern "C" unsigned long long bed_esp_get_beds(Vec3 *out, unsigned long long max) {
+    unsigned long long n = bed_esp_found_count < max ? bed_esp_found_count : max;
+    for (unsigned long long i = 0; i < n; i++)
+        out[i] = bed_esp_beds[i].pos;
+    return n;
+}

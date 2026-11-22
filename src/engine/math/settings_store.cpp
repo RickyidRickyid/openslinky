@@ -101,6 +101,7 @@ done:
 }
 
 FN(int, read_text_file, (char **path, char **data));
+FN(int, save_last_profile, (const char *name));
 FN(unsigned char, load_module_states, (const char *data, Mods *mods));
 FN(void, apply_module_state, (Mods *mods, Mod *module, int v));
 FN(void, queue_module_toggle, (Mods *module_manager, Mod *module, unsigned char enabled));
@@ -146,6 +147,7 @@ extern "C" int load_profile_name(const char *name, Mods *mods) {
         set_saved_string(name);
         settings_dirty_flag = 0;
         error_code = 0;
+        save_last_profile(name);        // remember it for the next injection
     }
     }
     libc_free(data);

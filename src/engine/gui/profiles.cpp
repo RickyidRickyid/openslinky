@@ -19,6 +19,9 @@ FN(void, set_saved_string, (const char *s));
 extern "C" const char str_slinky_in_profiles[], str_profiles[];
 extern "C" unsigned char settings_dirty_flag;
 
+extern "C" int save_last_profile(const char *name);     // defined at the bottom of this file
+extern "C" int load_last_profile(Mods *mods);
+
 extern "C" bool load_module_states(const char *text, Mods *mods) {
     cJSON *root = cjson_parse(text);
     if (!root) return false;
@@ -63,6 +66,7 @@ extern "C" int save_profile(const char *name, bool text, Mods *mods) {
             if (!error_code) {
                 set_saved_string(name);
                 settings_dirty_flag = 0;
+                save_last_profile(name);    // saving a profile makes it the one to come back to
             }
             cjson_free_string(json);
         }
@@ -453,4 +457,55 @@ FN(void, libc_free, (void *ptr));   // free
 extern "C" void clear_saved_string() {
     if (settings_buffer) libc_free(settings_buffer);
     settings_buffer = 0;
+}
+
+// ---- remember which profile was in use, and restore it on the next injection ----------------
+//
+// The GUI only knows the active profile through the saved-string buffer, which dies with the
+// process: switch to a profile, restart, and you are back on whatever the module defaults are.
+// This keeps the name on disk beside the profiles folder and applies it once after start-up.
+// Restoring at start-up rather than inside create_module_manager is deliberate - that function runs
+// before the settings layer is ready, and reading files there made unrelated modules misbehave
+// (left click among them).
+
+extern "C" const char str_last_profile[] = "last_profile";
+FN(int, read_text_file, (char **path, char **data));
+FN(void, libc_free, (void *ptr));
+extern "C" int load_profile_name(const char *name, Mods *mods);
+
+extern "C" int save_last_profile(const char *name) {
+    char *path = 0;
+    int rc = 1;
+    if (!name || !name[0])
+        return 1;
+    if (settings_path(&path) == 0 && settings_path_append(&path, str_slinky_in_profiles) == 0 &&
+        settings_path_ensure(&path) == 0 && settings_path_append(&path, str_last_profile) == 0)
+        rc = write_text_file(&path, name, true);
+    free_path(&path);
+    return rc;
+}
+
+extern "C" int load_last_profile(Mods *mods) {
+    char *path = 0;
+    char *data = 0;
+    int rc = 1;
+    if (settings_path(&path) == 0 && settings_path_append(&path, str_slinky_in_profiles) == 0 &&
+        settings_path_append(&path, str_last_profile) == 0 && read_text_file(&path, &data) == 0 &&
+        data) {
+        int n = 0;
+        while (data[n]) n++;
+        while (n > 0) {
+            char ch = data[n - 1];
+            if (ch == '\n' || ch == '\r' || ch == ' ' || ch == '\t')
+                data[--n] = 0;
+            else
+                break;
+        }
+        if (n > 0)
+            rc = load_profile_name(data, mods);
+    }
+    if (data)
+        libc_free(data);
+    free_path(&path);
+    return rc;
 }
