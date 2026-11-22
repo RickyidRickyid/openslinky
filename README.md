@@ -166,6 +166,7 @@ it plus the modules added since, so the repository matches what actually runs.
 ### Documentation
 
 Recent work, including every bug above with the log line that exposed it:
-[交接-2026-11-22.md](交接-2026-11-22.md). Structural notes (descriptor layout,
-event slots, setting layouts) are still accurate in
-[交接文档-2026-11-14.md](交接文档-2026-11-14.md).
+[docs/交接-2026-11-22.md](docs/交接-2026-11-22.md). Structural notes (descriptor
+layout, event slots, setting layouts) are still accurate in
+[docs/交接文档-2026-11-14.md](docs/交接文档-2026-11-14.md). The rest of `docs/` is
+historical handover material for this port.
