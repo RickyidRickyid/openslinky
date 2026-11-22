@@ -1,194 +1,171 @@
-# OpenSlinky
-
-> Minecraft 1.8.9 客户端的原生重写实现
-
-将 [Slinky](https://slinky.gg)（Minecraft 1.8.9 客户端）逆向重写为可读、可维护的 C++ 工程。
-产物是一个原生 DLL，通过 JVMTI 注入 JVM，在游戏进程内运行模块；另附一个把 DLL 内嵌在自身的单文件注入器。
-
-| | |
-|---|---|
-| **产物** | `Slinky.exe`（注入器，内嵌 DLL）、`SlinkyNative.dll`（客户端本体） |
-| **工具链** | MSVC 2022 BuildTools · LLVM clang-cl · CMake + Ninja |
-| **目标** | JVM（Minecraft 1.8.9 / Forge），x86-64 |
-| **语言** | C++17，界面渲染使用 NanoVG |
+<p align="center">
+  <img src="assets/ss.png" alt="Open Slinky Banner" width="350" />
+  <br>
+  <font size="6"><b>Open Slinky</b></font>
+  <br>
+  <font size="3">by Skid Solutions</font>
+  <br>
+  <font size="2">credits to cat;
+</p>
 
 ---
 
-## 目录
+<p align="center">
+  <a href="https://discord.gg/AEwatvnvSf">https://discord.gg/AEwatvnvSf</a>
+</p>
 
-- [特性](#特性)
-- [快速开始](#快速开始)
-- [快捷键](#快捷键)
-- [配置](#配置)
-- [从源码构建](#从源码构建)
-- [项目结构](#项目结构)
-- [已知限制](#已知限制)
-- [文档](#文档)
-
----
-
-## 特性
-
-74 个模块，按五个分类组织：
-
-| 分类 | 内容 |
-|---|---|
-| **Combat** | Kill Aura、Hit Select、Backtrack、Reach、Velocity、Criticals、Auto Clicker、Aim Assist、TPAura 等 |
-| **Move** | Speed、Fly、Sprint、Safe Walk、Null Move、Fast Accel、Instant Stop 等 |
-| **Visual** | ESP 系列（Bed / Player / Chest / Item / Block）、Chams、Name Tags、Indicators、Trajectories 等 |
-| **Block** | Scaffold、Fast Place、Fast Mine、Ghost Hand、Clutch、Bridge Assist 等 |
-| **Utility** | Chest Stealer、Inventory Manager、Timer、Blink、Ping Fix、Anti Bot 等 |
-
-### 毛玻璃界面
-
-ClickGUI 采用实时背景模糊的毛玻璃面板，参考 Apple HIG 与 Windows Fluent 的材质规范实现：
-
-- **捕获**：每 3 帧从默认帧缓冲读回一次，1/4 降采样后做双遍 box 模糊（三角核，接近高斯）
-- **色彩**：模糊后提升饱和度，避免画面趋于灰白
-- **材质**：卡片暗玻璃配色 + 135° 渐变边缘光 + 三层递减环境投影
-- **五档可调**：透明度、面板磨砂、色调、暗化强度、背景模糊半径
-- **可完全关闭**：关闭时不仅不绘制，连背景捕获一并停止，零运行时开销
-
-### 其他
-
-- 模块设置持久化到 `%USERPROFILE%\.slinky\profiles\`，支持多套配置快速切换
-- 中文 / 英文界面，中文界面内嵌字体子集
-- Bed ESP 采用事件驱动的区块更新（`0x14` 世界变更事件），替代轮询扫描
+<p align="center">
+  <img src="assets/jak.jpg" alt="java hooks" height="150" />
+  <img src="assets/hack.jpg" alt="unload" height="150" />
+  <img src="assets/deobf2.png" alt="symbol recovery" height="150" />
+  <img src="assets/deobf.jpg" alt="readable names" height="150" />
+</p>
 
 ---
 
-## 快速开始
+## About
 
-1. 解压发布包
-2. 启动 Minecraft 1.8.9（Forge）
-3. 双击 `Slinky.exe`
+Open Slinky is a readable C++ reconstruction of the Slinky client for Minecraft
+1.8.9. The client is injected into the game process as a native DLL; it hooks the
+game at the Java bytecode level through JVMTI, dispatches events to the module
+system, and renders its interface through NanoVG.
 
-`SlinkyNative.dll` 已经内嵌在 `Slinky.exe` 中，无需单独放置。注入器会自动查找 `javaw.exe` 进程。
+This edition is cleaned up for development:
 
-```
-Slinky.exe              中文界面（默认）
-Slinky.exe -en          英文界面
-Slinky.exe --list       列出当前 Java 进程
-Slinky.exe -n javaw     按进程名注入
-Slinky.exe --help       查看全部参数
-```
-
-> 更新版本时必须使用新的 `Slinky.exe`。DLL 内嵌在 exe 里，只替换 DLL 不会生效。
-
----
-
-## 快捷键
-
-| 按键 | 功能 |
-|---|---|
-| `R Shift` | 打开 / 关闭 ClickGUI |
-
-模块与配置的绑定键在界面内单独设置。
+- address-based file and function names have been replaced with descriptive
+  ones; the original symbols are recorded in `docs/symbol-map.json` (functions)
+  and `docs/global-symbol-map.json` (`data_<rva>` / `rdata_<rva>` globals and
+  the `*_part` event handlers), and inferred names are listed in
+  `docs/renames.md`;
+- assembly used only for byte-exact code generation has been removed; the
+  remaining `asm` tokens are symbol aliases, not instructions;
+- the client's data tables remain in `src/data` because the code links against
+  them (fonts, strings, module descriptors).
 
 ---
 
-## 配置
+## How to build
 
-配置文件位于 `%USERPROFILE%\.slinky\`：
+### Prerequisites
 
-```
-.slinky/
-├── settings                    全局设置（语言、GUI 外观）
-├── profiles/                   配置存档，每个文件一套完整模块状态
-│   ├── Default
-│   └── <自定义名称>
-└── bin/                        原版客户端二进制（可选，本工程不依赖）
-```
+- **LLVM** — clang-cl, lld-link, llvm-rc and llvm-mt on `PATH`
+- **CMake** 3.20 or newer
+- **Ninja**
+- **Windows x64**
+- **Java Development Kit 8** — runtime for Minecraft 1.8.9; not required to
+  compile the DLL
 
-切换配置：GUI → **Profiles** → 点击对应条目加载。
-
----
-
-## 从源码构建
-
-### 依赖
-
-- Visual Studio 2022 BuildTools（提供 MSVC 头文件与库）
-- LLVM / clang-cl
-- CMake 3.20+、Ninja
-- LLVM `llvm-rc`（编译注入器资源）
-
-### 构建
+### 1. Configure
 
 ```powershell
-cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-windows-clang-cl.cmake
+cmake -S . -B build -G Ninja `
+  -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-windows-clang-cl.cmake
+```
+
+If Ninja is not on `PATH`, add
+`-DCMAKE_MAKE_PROGRAM=C:/path/to/ninja.exe`.
+
+### 2. Build
+
+```powershell
 cmake --build build
 ```
 
-产物位于 `build/SlinkyNative.dll`。
+Output:
 
-### 注入器
+- `build/slinky.dll`
 
-注入器把 DLL 作为 RCDATA 资源 `200` 内嵌，因此每次重新构建 DLL 后都必须重新链接注入器：
+### Running
 
-```powershell
-llvm-rc /fo injector.res injector/injector.rc
-clang-cl /std:c++17 /O2 /MT injector/*.cpp injector.res /Fe:Slinky.exe
-```
-
-验证内嵌内容是否与构建产物一致的方式，以及构建、注入、调试过程中的常见问题，见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+Inject `slinky.dll` into the running Minecraft 1.8.9 process with
+`LoadLibrary`. Start-up runs on its own thread; the client interface is opened
+with its GUI key. The last interface tab unloads the client: it saves the
+settings, removes the Java hooks and frees the library.
 
 ---
 
-## 项目结构
+## Project layout
 
 ```
-src/
-├── data/             数据段（字符串表、字体、导入表）
-├── engine/
-│   ├── base/         引擎入口、帧钩子
-│   ├── gui/          ClickGUI 渲染、布局、控件、毛玻璃
-│   ├── jni/          JNI 原语与 ID 表、事件分发、模块管理
-│   ├── math/         数学与设置存储
-│   ├── modlib/       引擎层辅助（方块表、背包、好友等）
-│   └── protected/    受保护区域（钩子表）
-├── logic/
-│   ├── combat/       战斗模块
-│   ├── move/         移动模块
-│   ├── visual/       视觉模块
-│   ├── block/        建筑模块
-│   ├── utility/      工具模块
-│   └── movement/     移动模块（B4 移植）
-├── platform/         平台层（NanoVG 绑定、OpenGL 槽位）
-└── injector/         注入器
-include/slinky/       公共头文件（JNI ID 表、模块 API）
-third_party/          NanoVG、精简 CRT、GL 头
+src/engine/         hooks, JNI/JVMTI, GUI, module manager, math, shared services
+src/logic/          per-module behaviour (.cpp) and its descriptor callbacks / settings page (.h)
+src/platform/       Windows layer, GL loader, NanoVG integration
+src/data/           data tables (fonts, strings, descriptors) - required to link
+include/slinky/     public headers
+docs/               design notes and the symbol map
+third_party/        NanoVG and GL headers
 ```
+
+## Notes
+
+- Start-up, teardown, the window hook and the unload thread were virtualised in
+  the original image and are reconstructed in `src/engine/protected/`.
+- `docs/symbol-map.json` maps every original `fn_<rva>`, `logic_<rva>`,
+  `cb_<rva>`, `reg_<rva>` and `aux_<rva>` symbol to its readable name.
+- Settings and profiles are stored in `~/.slinky` (`settings`, `profiles/`).
+- `src/data/*.s` and `src/platform/win/chkstk.s` are data/compiler-support
+  sections, not client code, this is 1 to 1 logic but may have some issues that we didnt find.
+
+## Credits
+
+- Original client: Slinky
+- Reconstruction: Claude (VMProtect devirtualization), DeepSeek (decryption),
+  GLM and Claude (symbol recovery)
+
+## Legal & disclaimers
+
+- **Affiliation:** This is an independent development. It is **NOT AN OFFICIAL
+  SLINKY PRODUCT**, is not approved by or associated with the original authors,
+  and is not affiliated with Mojang or Zelix Pty Ltd.
+- **Assets & code:** No un-obfuscated original source code is distributed
+  directly within this repository. The `src/data` tables are the client's own
+  data required for linking; all third-party assets and code belong to their
+  respective owners.
+- **Purpose:** research and preservation. Use at your own risk.
 
 ---
 
-## 已知限制
+## This fork (`rickyid` build)
 
-| 项 | 说明 |
+The reconstruction above is unchanged. This branch carries a working build of
+it plus the modules added since, so the repository matches what actually runs.
+
+### Modules added here
+
+| | |
 |---|---|
-| **TPAura** | 纯客户端修改坐标，服务端会在下一帧拉回。这是模块原理，不是缺陷 |
-| **Hit Select** | `cancel_rate_air = 1` 会 100% 取消对着空气的点击，`cancel_rate = 1` 对实体也按时机取消。两项都是设计行为，觉得干扰就调低 |
-| **毛玻璃开销** | 实时捕获存在固定成本（约 4.6 ms / 次，每 3 帧一次）。低配机器建议关闭或降低捕获频率 |
-| **原版设置面板** | 由原版引擎绘制的模块详情面板不受毛玻璃影响，其绘制流程在原版二进制中 |
-| **平台** | 仅支持 Windows x64 + Minecraft 1.8.9 / Forge |
+| **Frosted GUI** | Five adjustable glass levels on the ClickGUI. Master switch off = stock solid panel, zero cost (background capture stops too). |
+| **BowAim** | Combat. Takes over while the bow is drawn. Tracks target velocity per frame, leads by the tick the solved arc actually enters the hitbox, and verifies the arc against the hitbox instead of "landing closest to the body". 15 settings; `Predict` is the link latency in milliseconds, `Target mobs` switches from players-only to everything living. |
+| **Bed Plates** | Visual. Colours each bed by how well it is protected (green bare, yellow light wrap, orange real defence, red obsidian). Reuses Bed ESP's bed list. |
+| **Profile memory** | The last profile used is remembered and restored on the next injection. |
 
----
+### Behaviour worth knowing
 
-## 文档
+- `~/.slinky/profiles/` is created on first injection, so "open folder" works
+  before any profile has ever been saved.
+- Module defaults only apply when no profile exists; a saved profile overrides
+  them.
+- BowAim solves for the peak draw of the current pull. Release below ~15 ticks
+  and the arrow physically cannot reach - that is not an aim error.
+- A target with more than 0.6 s of flight time can see the arrow coming and step
+  aside. Close the distance.
 
-| 文件 | 内容 |
-|---|---|
-| [交接-2026-11-22.md](交接-2026-11-22.md) | **当前状态**：这次加的东西、踩过的坑、打包验收流程 |
-| [交接文档-2026-11-14.md](交接文档-2026-11-14.md) | 描述符 0x210 布局、事件槽位、设置对象布局（结构性内容仍有效） |
-| [DEVELOPMENT.md](DEVELOPMENT.md) | 构建细节、注入调试、事件表、踩坑记录、代码地图 |
-| [对话上下文-交给新会话.md](对话上下文-交给新会话.md) | 11-13~11-14 的决策脉络，接手时补背景用 |
-| [交接-毛玻璃设置-2026-11-14.md](交接-毛玻璃设置-2026-11-14.md) | 毛玻璃五档调参与各档视觉对照 |
-| [毛玻璃参考-2026-11-14.md](毛玻璃参考-2026-11-14.md) | 毛玻璃材质规范的调研与参数对照 |
-| [BEDESP-下一步-按区块扫描.md](BEDESP-下一步-按区块扫描.md) | Bed ESP 增量扫描方案（已部分实现） |
-| [版本说明-1.7.10与1.8.9.md](版本说明-1.7.10与1.8.9.md) | 同一份源码如何同时支持两个版本 |
+### Bugs fixed in the reconstruction
 
----
+- `aabb_expand` is exported as `(out, box, d)` taking pointers, but every module
+  declared it `(Box, double)` by value. The box that came back was garbage and it
+  wrote through an uninitialised pointer. BowAim and `trajectory_predict` expand
+  by hand now; four other modules still call it.
+- Rotation written through `apply_silent_rotation` is quantised to
+  `mouse_sensitivity_step` (0.15 degrees at default sensitivity) and the offset
+  is cleared every frame, so small corrections were dropped forever. Modules
+  write `set_entity_rotation` directly now.
+- Two handover documents were stored as UTF-8-encoded mojibake and were unreadable;
+  they have been restored from the clean copies.
 
-## 声明
+### Documentation
 
-本项目仅用于逆向工程学习与软件架构研究。使用前请确认符合你所处环境的规则与条款。作者不对使用后果承担责任。
+Recent work, including every bug above with the log line that exposed it:
+[交接-2026-11-22.md](交接-2026-11-22.md). Structural notes (descriptor layout,
+event slots, setting layouts) are still accurate in
+[交接文档-2026-11-14.md](交接文档-2026-11-14.md).
