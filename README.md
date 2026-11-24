@@ -165,8 +165,14 @@ it plus the modules added since, so the repository matches what actually runs.
 
 ### Documentation
 
-Recent work, including every bug above with the log line that exposed it:
-[docs/交接-2026-11-22.md](docs/交接-2026-11-22.md). Structural notes (descriptor
-layout, event slots, setting layouts) are still accurate in
-[docs/交接文档-2026-11-14.md](docs/交接文档-2026-11-14.md). The rest of `docs/` is
-historical handover material for this port.
+Two starting points:
+
+- [docs/交接-视觉优化-2026-11-24.md](docs/交接-视觉优化-2026-11-24.md) -- GUI and
+  world rendering: file map, frosted-glass internals and its compile-time knobs,
+  the six things that break visual work, and what is left to improve.
+- [docs/交接-2026-11-22.md](docs/交接-2026-11-22.md) -- recent module work,
+  including every bug above with the log line that exposed it.
+
+Structural notes (descriptor layout, event slots, setting layouts) are still
+accurate in [docs/交接文档-2026-11-14.md](docs/交接文档-2026-11-14.md). The rest of
+`docs/` is historical handover material for this port.
