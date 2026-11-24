@@ -167,6 +167,10 @@ it plus the modules added since, so the repository matches what actually runs.
 
 Two starting points:
 
+> This directory is both the source tree and the git repository. Edit,
+> build (`_build_full`) and `git commit` here -- there is no separate tree to
+> sync from.
+
 - [docs/交接-视觉优化-2026-11-24.md](docs/交接-视觉优化-2026-11-24.md) -- GUI and
   world rendering: file map, frosted-glass internals and its compile-time knobs,
   the six things that break visual work, and what is left to improve.
